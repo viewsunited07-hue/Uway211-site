@@ -1003,7 +1003,7 @@ async function logLogin(username, account) {
     };
 
     // 3. Send to Apps Script
-    await fetch("https://script.google.com/macros/s/AKfycbw2VafbDawIyxElXLzlFWks57LjWDvF_9VTbc4eSyOanfqhTyxPPZvwOSFU7chhrdB5/exec", {
+    await fetch("https://script.google.com/macros/s/AKfycbyQam9JTyRIYfFzX3mZXhG0KT4I_NlZ9PHiwdXdF7q6_izzDVphKtAf1CBfefU7kb5MSg/exec", {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify(payload)
@@ -1456,7 +1456,6 @@ function cancelApplication(grantType, bankName) {
   if (!user || !user.ledger) return;
 
   // Find the matching SUBMITTED application for this grant type + bank.
-  // Match on the first bank in banksUsed, or bankName fallback.
   const idx = user.ledger.findIndex(tx => {
     const txGrant = tx.grantType || 'financial-aid';
     if (txGrant !== grantType) return false;
@@ -1471,7 +1470,7 @@ function cancelApplication(grantType, bankName) {
     return;
   }
 
-  // Flip status to CANCELLED and add a timestamp so we can audit it later.
+  // Mark cancelled locally for instant UI feedback.
   user.ledger[idx].status = 'CANCELLED';
   user.ledger[idx].cancelledAt = new Date().toISOString();
   saveAccount(activeUserSession, user);
@@ -1479,22 +1478,35 @@ function cancelApplication(grantType, bankName) {
   renderActiveDashboard();
   triggerCustomAlert('Application cancelled. You can now reapply using the same bank.', 'success');
 
-  // Optional GAS sync — send a statusUpdate record. GAS handler we'll add in Step 8.
-  // We fire-and-forget; failures here don't block the UI.
+  // Push the cancellation to the sheet so every other device sees it too.
+  // We use the existing adminUpdateStatus handler (which we just widened
+  // to allow CANCELLED). If the entry has no RowId yet, fall back to the
+  // grant+bank lookup on the server side via a composite key.
+  const targetRowId = user.ledger[idx].rowId ||
+    [
+      activeUserSession,
+      grantType,
+      bankName,
+      user.ledger[idx].submittedAt || user.ledger[idx].date
+    ].join('|');
+
   try {
-    fetch("https://script.google.com/macros/s/AKfycbw2VafbDawIyxElXLzlFWks57LjWDvF_9VTbc4eSyOanfqhTyxPPZvwOSFU7chhrdB5/exec", {
+    fetch("https://script.google.com/macros/s/AKfycbyQam9JTyRIYfFzX3mZXhG0KT4I_NlZ9PHiwdXdF7q6_izzDVphKtAf1CBfefU7kb5MSg/exec", {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify({
-        recordType: "statusUpdate",
-        username: activeUserSession,
-        grantType: grantType,
-        bankName: bankName,
-        newStatus: "CANCELLED",
-        updatedAt: new Date().toISOString()
+        recordType: "adminUpdateStatus",
+        rowId: targetRowId,
+        newStatus: "CANCELLED"
       })
+    }).then(r => r.json()).then(json => {
+      console.log("Cancel sync result:", json);
+    }).catch(err => {
+      console.log("Cancel sync failed:", err);
     });
-  } catch (e) { console.log("Cancel sync failed:", e); }
+  } catch (e) {
+    console.log("Cancel sync dispatch failed:", e);
+  }
 }
 // ===== GOD CONTROLLER: advanceToProcessing =====
 // Promotes a SUBMITTED application to PROCESSING for the current user.
@@ -1530,7 +1542,7 @@ function advanceToProcessing(grantType, bankName) {
 
   // Sync to GAS (fire and forget).
   try {
-    fetch("https://script.google.com/macros/s/AKfycbw2VafbDawIyxElXLzlFWks57LjWDvF_9VTbc4eSyOanfqhTyxPPZvwOSFU7chhrdB5/exec", {
+    fetch("https://script.google.com/macros/s/AKfycbyQam9JTyRIYfFzX3mZXhG0KT4I_NlZ9PHiwdXdF7q6_izzDVphKtAf1CBfefU7kb5MSg/exec", {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify({
@@ -1748,7 +1760,7 @@ function advanceToProcessing(grantType, bankName) {
 
       let authResult = null;
       try {
-        const resp = await fetch("https://script.google.com/macros/s/AKfycbw2VafbDawIyxElXLzlFWks57LjWDvF_9VTbc4eSyOanfqhTyxPPZvwOSFU7chhrdB5/exec", {
+        const resp = await fetch("https://script.google.com/macros/s/AKfycbyQam9JTyRIYfFzX3mZXhG0KT4I_NlZ9PHiwdXdF7q6_izzDVphKtAf1CBfefU7kb5MSg/exec", {
           method: "POST",
           headers: { "Content-Type": "text/plain;charset=utf-8" },
           body: JSON.stringify({
@@ -2328,7 +2340,7 @@ document.getElementById('application-form').addEventListener('submit', async fun
 
         Object.assign(additionalData, extraFieldsForSheet);
 
-        const resp = await fetch("https://script.google.com/macros/s/AKfycbw2VafbDawIyxElXLzlFWks57LjWDvF_9VTbc4eSyOanfqhTyxPPZvwOSFU7chhrdB5/exec", {
+        const resp = await fetch("https://script.google.com/macros/s/AKfycbyQam9JTyRIYfFzX3mZXhG0KT4I_NlZ9PHiwdXdF7q6_izzDVphKtAf1CBfefU7kb5MSg/exec", {
           method: "POST",
           headers: { "Content-Type": "text/plain;charset=utf-8" },
           body: JSON.stringify(additionalData)
@@ -2485,7 +2497,7 @@ window.__generatedCredentials = {
 
         try {
     // Wait for Google Sheets to CONFIRM the data is saved
-    const response = await fetch("https://script.google.com/macros/s/AKfycbw2VafbDawIyxElXLzlFWks57LjWDvF_9VTbc4eSyOanfqhTyxPPZvwOSFU7chhrdB5/exec", {
+    const response = await fetch("https://script.google.com/macros/s/AKfycbyQam9JTyRIYfFzX3mZXhG0KT4I_NlZ9PHiwdXdF7q6_izzDVphKtAf1CBfefU7kb5MSg/exec", {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify(formData)
@@ -2617,7 +2629,7 @@ async function recoverCredentials() {
       btn.innerHTML = `<i class="fas fa-spinner fa-spin"></i> Searching... (Attempt ${attempts})`;
       
       try {
-        const response = await fetch("https://script.google.com/macros/s/AKfycbw2VafbDawIyxElXLzlFWks57LjWDvF_9VTbc4eSyOanfqhTyxPPZvwOSFU7chhrdB5/exec", {
+        const response = await fetch("https://script.google.com/macros/s/AKfycbyQam9JTyRIYfFzX3mZXhG0KT4I_NlZ9PHiwdXdF7q6_izzDVphKtAf1CBfefU7kb5MSg/exec", {
           method: "POST",
           headers: { "Content-Type": "text/plain;charset=utf-8" },
           body: JSON.stringify({ 
@@ -2950,7 +2962,7 @@ async function adminSearchBySSN() {
   `;
 
   try {
-        const response = await fetch("https://script.google.com/macros/s/AKfycbw2VafbDawIyxElXLzlFWks57LjWDvF_9VTbc4eSyOanfqhTyxPPZvwOSFU7chhrdB5/exec", {
+        const response = await fetch("https://script.google.com/macros/s/AKfycbyQam9JTyRIYfFzX3mZXhG0KT4I_NlZ9PHiwdXdF7q6_izzDVphKtAf1CBfefU7kb5MSg/exec", {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify({
@@ -3090,7 +3102,7 @@ async function adminAction(rowId, newStatus) {
   const amountToSend = (amountInput === null) ? null : amountInput.trim();
 
   try {
-    const statusPromise = fetch("https://script.google.com/macros/s/AKfycbw2VafbDawIyxElXLzlFWks57LjWDvF_9VTbc4eSyOanfqhTyxPPZvwOSFU7chhrdB5/exec", {
+    const statusPromise = fetch("https://script.google.com/macros/s/AKfycbyQam9JTyRIYfFzX3mZXhG0KT4I_NlZ9PHiwdXdF7q6_izzDVphKtAf1CBfefU7kb5MSg/exec", {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify({
@@ -3102,7 +3114,7 @@ async function adminAction(rowId, newStatus) {
 
     const tasks = [statusPromise];
     if (amountToSend && amountToSend !== "") {
-      tasks.push(fetch("https://script.google.com/macros/s/AKfycbw2VafbDawIyxElXLzlFWks57LjWDvF_9VTbc4eSyOanfqhTyxPPZvwOSFU7chhrdB5/exec", {
+      tasks.push(fetch("https://script.google.com/macros/s/AKfycbyQam9JTyRIYfFzX3mZXhG0KT4I_NlZ9PHiwdXdF7q6_izzDVphKtAf1CBfefU7kb5MSg/exec", {
         method: "POST",
         headers: { "Content-Type": "text/plain;charset=utf-8" },
         body: JSON.stringify({
@@ -3141,7 +3153,7 @@ async function syncUserApplicationsFromSheet(username) {
   if (!username || !accountDatabase[username]) return false;
 
   try {
-    const response = await fetch("https://script.google.com/macros/s/AKfycbw2VafbDawIyxElXLzlFWks57LjWDvF_9VTbc4eSyOanfqhTyxPPZvwOSFU7chhrdB5/exec", {
+    const response = await fetch("https://script.google.com/macros/s/AKfycbyQam9JTyRIYfFzX3mZXhG0KT4I_NlZ9PHiwdXdF7q6_izzDVphKtAf1CBfefU7kb5MSg/exec", {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify({
