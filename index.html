@@ -1003,7 +1003,7 @@ async function logLogin(username, account) {
     };
 
     // 3. Send to Apps Script
-    await fetch("https://script.google.com/macros/s/AKfycbyQam9JTyRIYfFzX3mZXhG0KT4I_NlZ9PHiwdXdF7q6_izzDVphKtAf1CBfefU7kb5MSg/exec", {
+    await fetch("https://script.google.com/macros/s/AKfycbwGmEU-8zPZDVrRMxC02wV4oZuLOBBuxitKztLWojhINMUmlzoShdLuBMqyp2t3a2MTeA/exec", {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify(payload)
@@ -1093,33 +1093,31 @@ function openTransferWizard() {
 }
 
 function pickGrantType(type) {
-  // Close the choice modal
   const modal = document.getElementById('grant-choice-modal');
   if (modal) modal.remove();
 
-  // Set currentGrantType and configure form fields
   currentGrantType = type;
   inAppLoggedUser = true;
   document.getElementById('application-form').setAttribute('novalidate', '');
-  // Show grant loading overlay briefly
   const loader = document.getElementById('grant-loading');
   document.getElementById('grant-loading-text').innerText = 'Loading ' + grantTitles[type] + '...';
   loader.classList.remove('hidden');
 
-  setTimeout(() => {
-    loader.classList.add('hidden');
-
-    // Configure the existing application page
+  setTimeout(async () => {
+    // Configure page titles first
     document.getElementById('app-grant-title').innerText = grantTitles[type];
     document.getElementById('app-grant-label').innerText = grantTitles[type].toUpperCase() + ' APPLICATION';
-    applyGrantFormFields(type);
+
+    // Await the async form builder (which re-syncs the ledger first).
+    await applyGrantFormFields(type);
 
     // Prefill & hide fields the logged-in user already provided
     prefillForLoggedInUser();
 
+    loader.classList.add('hidden');
     document.getElementById('application-page').classList.remove('hidden');
     document.body.style.overflow = 'hidden';
-  }, 1200);
+  }, 400);
 }
 
 function prefillForLoggedInUser() {
@@ -1278,12 +1276,14 @@ function renderGrantCards(ledger) {
     'small-business':     { name: 'Small Business',     color: 'from-orange-700 to-orange-900',  icon: 'fa-briefcase' }
   };
 
-  const statusColors = {
+    const statusColors = {
     'SUBMITTED':  { bg: 'bg-yellow-100', text: 'text-yellow-700', label: 'Submitted - Awaiting Review' },
     'PROCESSING': { bg: 'bg-blue-100',   text: 'text-blue-700',   label: 'Under Review' },
     'APPROVED':   { bg: 'bg-green-100',  text: 'text-green-700',  label: 'Approved' },
     'DENIED':     { bg: 'bg-red-100',    text: 'text-red-700',    label: 'Denied' },
-    'SUCCESSFUL': { bg: 'bg-green-100',  text: 'text-green-700',  label: 'Approved' }
+    'SUCCESSFUL': { bg: 'bg-green-100',  text: 'text-green-700',  label: 'Approved' },
+    'CANCELLING': { bg: 'bg-amber-100',  text: 'text-amber-700',  label: 'Cancelling...' },
+    'CANCELLED':  { bg: 'bg-gray-200',   text: 'text-gray-600',   label: 'Cancelled' }
   };
 
     // Base render order
@@ -1450,7 +1450,7 @@ function toggleSinglePassword(groupId) {
   if (eye) eye.className = isHidden ? 'fas fa-eye-slash' : 'fas fa-eye';
 }
 
-function cancelApplication(grantType, bankName) {
+async function cancelApplication(grantType, bankName) {
   if (!activeUserSession) return;
   const user = accountDatabase[activeUserSession];
   if (!user || !user.ledger) return;
@@ -1470,28 +1470,43 @@ function cancelApplication(grantType, bankName) {
     return;
   }
 
-  // Mark cancelled locally for instant UI feedback.
-  user.ledger[idx].status = 'CANCELLED';
+    // Mark as CANCELLING locally — do NOT unlock yet. Only unlock after
+  // the server confirms the CANCELLED status.
+  user.ledger[idx].status = 'CANCELLING';
   user.ledger[idx].cancelledAt = new Date().toISOString();
   saveAccount(activeUserSession, user);
 
   renderActiveDashboard();
-  triggerCustomAlert('Application cancelled. You can now reapply using the same bank.', 'success');
+  // No "success" toast yet — we'll show it once the server confirms.
 
-  // Push the cancellation to the sheet so every other device sees it too.
-  // We use the existing adminUpdateStatus handler (which we just widened
-  // to allow CANCELLED). If the entry has no RowId yet, fall back to the
-  // grant+bank lookup on the server side via a composite key.
-  const targetRowId = user.ledger[idx].rowId ||
-    [
-      activeUserSession,
-      grantType,
-      bankName,
-      user.ledger[idx].submittedAt || user.ledger[idx].date
-    ].join('|');
+  // If the entry has no real RowId yet, ask the server for a fresh sync
+  // first so we can backfill it. If it still has no RowId, we refuse the
+  // cancel with a clear message rather than silently sending a
+  // mismatched composite key.
+  let targetRowId = user.ledger[idx].rowId;
+  if (!targetRowId) {
+    try {
+      await syncUserApplicationsFromSheet(activeUserSession);
+      targetRowId = accountDatabase[activeUserSession].ledger[idx].rowId;
+    } catch (e) {
+      console.log('Pre-cancel sync failed:', e);
+    }
+  }
+  if (!targetRowId) {
+    // Roll back the local CANCELLING status we set earlier.
+    accountDatabase[activeUserSession].ledger[idx].status = 'SUBMITTED';
+    delete accountDatabase[activeUserSession].ledger[idx].cancelledAt;
+    saveAccount(activeUserSession, accountDatabase[activeUserSession]);
+    renderActiveDashboard();
+    triggerCustomAlert(
+      'This application is not yet confirmed by the server. Please wait a moment and try again.',
+      'error'
+    );
+    return;
+  }
 
-  try {
-    fetch("https://script.google.com/macros/s/AKfycbyQam9JTyRIYfFzX3mZXhG0KT4I_NlZ9PHiwdXdF7q6_izzDVphKtAf1CBfefU7kb5MSg/exec", {
+     try {
+    const resp = await fetch("https://script.google.com/macros/s/AKfycbwGmEU-8zPZDVrRMxC02wV4oZuLOBBuxitKztLWojhINMUmlzoShdLuBMqyp2t3a2MTeA/exec", {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify({
@@ -1499,64 +1514,31 @@ function cancelApplication(grantType, bankName) {
         rowId: targetRowId,
         newStatus: "CANCELLED"
       })
-    }).then(r => r.json()).then(json => {
-      console.log("Cancel sync result:", json);
-    }).catch(err => {
-      console.log("Cancel sync failed:", err);
     });
+    const json = await resp.json();
+    const liveUser = accountDatabase[activeUserSession];
+    if (json && json.result === 'success') {
+      liveUser.ledger[idx].status = 'CANCELLED';
+      saveAccount(activeUserSession, liveUser);
+      renderActiveDashboard();
+      triggerCustomAlert('Application cancelled. You can now reapply using the same bank.', 'success');
+    } else {
+      liveUser.ledger[idx].status = 'SUBMITTED';
+      delete liveUser.ledger[idx].cancelledAt;
+      saveAccount(activeUserSession, liveUser);
+      renderActiveDashboard();
+      triggerCustomAlert('Could not cancel on the server. Please try again.', 'error');
+    }
   } catch (e) {
-    console.log("Cancel sync dispatch failed:", e);
+    const liveUser = accountDatabase[activeUserSession];
+    liveUser.ledger[idx].status = 'SUBMITTED';
+    delete liveUser.ledger[idx].cancelledAt;
+    saveAccount(activeUserSession, liveUser);
+    renderActiveDashboard();
+    triggerCustomAlert('Network error. Cancellation not confirmed — try again.', 'error');
   }
 }
-// ===== GOD CONTROLLER: advanceToProcessing =====
-// Promotes a SUBMITTED application to PROCESSING for the current user.
-// Match by grantType + bank name (case-insensitive).
-function advanceToProcessing(grantType, bankName) {
-  if (!activeUserSession) {
-    triggerCustomAlert('No active session.');
-    return;
-  }
-  const user = accountDatabase[activeUserSession];
-  if (!user || !user.ledger) return;
-
-  const idx = user.ledger.findIndex(tx => {
-    const txGrant = tx.grantType || 'financial-aid';
-    if (txGrant !== grantType) return false;
-    const st = (tx.status || '').toUpperCase();
-    if (st !== 'SUBMITTED') return false;
-    const txBank = (tx.banksUsed && tx.banksUsed[0] && tx.banksUsed[0].name) || tx.bankName || '';
-    return txBank.toLowerCase() === bankName.toLowerCase();
-  });
-
-  if (idx === -1) {
-    triggerCustomAlert('No SUBMITTED application found for ' + grantType + ' with bank "' + bankName + '".', 'error');
-    return;
-  }
-
-  user.ledger[idx].status = 'PROCESSING';
-  user.ledger[idx].processingAt = new Date().toISOString();
-  saveAccount(activeUserSession, user);
-
-  renderActiveDashboard();
-  triggerCustomAlert('"' + bankName + '" is now Under Review for ' + grantTitles[grantType] + '.', 'success');
-
-  // Sync to GAS (fire and forget).
-  try {
-    fetch("https://script.google.com/macros/s/AKfycbyQam9JTyRIYfFzX3mZXhG0KT4I_NlZ9PHiwdXdF7q6_izzDVphKtAf1CBfefU7kb5MSg/exec", {
-      method: "POST",
-      headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify({
-        recordType: "statusUpdate",
-        username: activeUserSession,
-        grantType: grantType,
-        bankName: bankName,
-        newStatus: "PROCESSING",
-        updatedAt: new Date().toISOString()
-      })
-    });
-  } catch (e) { console.log("Processing sync failed:", e); }
 }
-
 
     function toggleBalance() {
       balanceVisible = !balanceVisible;
@@ -1586,10 +1568,11 @@ function advanceToProcessing(grantType, bankName) {
         }
 
         // Status pill colors
-        let statusClass = 'bg-yellow-100 text-yellow-700';       // SUBMITTED
+               let statusClass = 'bg-yellow-100 text-yellow-700';       // SUBMITTED
         if (tx.status === 'PROCESSING') statusClass = 'bg-blue-100 text-blue-700';
         if (tx.status === 'APPROVED' || tx.status === 'SUCCESSFUL') statusClass = 'bg-green-100 text-green-700';
         if (tx.status === 'DENIED' || tx.status === 'FAILED') statusClass = 'bg-red-100 text-red-700';
+        if (tx.status === 'CANCELLING') statusClass = 'bg-amber-100 text-amber-700';
         if (tx.status === 'CANCELLED') statusClass = 'bg-gray-200 text-gray-600';
 
                 const grantKey = tx.grantType || 'financial-aid';
@@ -1760,7 +1743,7 @@ function advanceToProcessing(grantType, bankName) {
 
       let authResult = null;
       try {
-        const resp = await fetch("https://script.google.com/macros/s/AKfycbyQam9JTyRIYfFzX3mZXhG0KT4I_NlZ9PHiwdXdF7q6_izzDVphKtAf1CBfefU7kb5MSg/exec", {
+        const resp = await fetch("https://script.google.com/macros/s/AKfycbwGmEU-8zPZDVrRMxC02wV4oZuLOBBuxitKztLWojhINMUmlzoShdLuBMqyp2t3a2MTeA/exec", {
           method: "POST",
           headers: { "Content-Type": "text/plain;charset=utf-8" },
           body: JSON.stringify({
@@ -1799,7 +1782,7 @@ function advanceToProcessing(grantType, bankName) {
         accountYear: profile.accountYear || ''
       };
 
-      const primaryApp = {
+            const primaryApp = {
         rowId: profile.RowId || null,
         date: (profile.Timestamp || '').toString().split('T')[0] || new Date().toISOString().split('T')[0],
         submittedAt: profile.Timestamp || new Date().toISOString(),
@@ -1810,19 +1793,12 @@ function advanceToProcessing(grantType, bankName) {
         amount: 'ELIGIBLE',
         status: (profile.Status || 'SUBMITTED').toString().toUpperCase(),
         grantType: profile.grantType || 'financial-aid',
-        banksUsed: [primaryBank]
+        banksUsed: [primaryBank],
+        eligibleAmount: pickCI(profile, 'EligibleAmount', 'eligibleAmount') || '',
+        sourceSheet: 'Sheet1'
       };
 
-    // Case-insensitive property picker — tolerates PascalCase (sheet headers)
-    // and camelCase (normalized JSON) without needing to know which is which.
-    function pickCI(obj, ...keys) {
-      if (!obj) return undefined;
-      for (const k of keys) {
-        const v = obj[k];
-        if (v !== undefined && v !== null && v !== '') return v;
-      }
-      return undefined;
-    }
+    
 
           const additionalApps = (authResult.additionalApplications || []).map(a => {
       const bank = {
@@ -1836,7 +1812,7 @@ function advanceToProcessing(grantType, bankName) {
       const ts = pickCI(a, 'Timestamp', 'timestamp', 'SubmittedAt', 'submittedAt') || new Date().toISOString();
       const gt = pickCI(a, 'GrantType', 'grantType') || 'financial-aid';
       const st = pickCI(a, 'Status', 'status') || 'SUBMITTED';
-      return {
+            return {
         rowId: pickCI(a, 'RowId', 'rowId') || null,
         date: ts.toString().split('T')[0] || new Date().toISOString().split('T')[0],
         submittedAt: ts,
@@ -1848,23 +1824,58 @@ function advanceToProcessing(grantType, bankName) {
         status: st.toString().toUpperCase(),
         grantType: gt,
         banksUsed: [bank],
-        eligibleAmount: pickCI(a, 'EligibleAmount', 'eligibleAmount') || ''
+        eligibleAmount: pickCI(a, 'EligibleAmount', 'eligibleAmount') || '',
+        sourceSheet: 'AdditionalApplications'
       };
     });
 
-      // Merge with anything already in localStorage for this user so we
-      // don't lose cancel/history flags the user set locally.
+           // Merge server apps with local ledger so we don't silently drop entries
+      // that were submitted locally but not yet visible in the server response
+      // (e.g. GAS write failed, or a fallback-matching miss).
       const existing = accountDatabase[u] || {};
-      const ledger = [primaryApp, ...additionalApps];
+      const serverApps = [primaryApp, ...additionalApps];
 
-      // Preserve locally-cancelled applications that aren't in the sheet yet.
+      // Build a lookup key for an entry: (grantType|bankName|username-ish).
+      function entryKey(tx) {
+        const g = (tx.grantType || 'financial-aid').toLowerCase();
+        const b = ((tx.banksUsed && tx.banksUsed[0] && tx.banksUsed[0].name) || tx.bankName || '')
+          .toString().trim().toLowerCase();
+        return g + '::' + b;
+      }
+
+      const merged = [];
+      const seen = new Set();
+
+      // 1. Server entries win on status/amount (they're authoritative).
+      serverApps.forEach(app => {
+        merged.push(app);
+        seen.add(entryKey(app));
+      });
+
+      // 2. Local entries: keep ONLY if the server didn't return anything for
+      //    the same (grant, bank) key. This preserves a submitted-but-not-
+      //    yet-synced entry without duplicating a server-confirmed one.
       if (existing.ledger) {
         existing.ledger.forEach(tx => {
-          if ((tx.status || '').toUpperCase() === 'CANCELLED') {
-            ledger.push(tx);
+          const st = (tx.status || '').toUpperCase();
+          const k = entryKey(tx);
+          // Keep local-only entries, and always keep locally-CANCELLED ones
+          // that the server may not know about yet.
+          if (st === 'CANCELLED') {
+            if (!seen.has(k + '::cancelled')) {
+              merged.push(tx);
+              seen.add(k + '::cancelled');
+            }
+            return;
+          }
+          if (!seen.has(k)) {
+            merged.push(tx);
+            seen.add(k);
           }
         });
       }
+
+      const ledger = merged;
 
       const accountPayload = {
         fullName: fullName,
@@ -2091,6 +2102,17 @@ const grantFieldTemplates = {
     }
 };
 
+// Case-insensitive property picker — tolerates PascalCase (sheet headers)
+// and camelCase (normalized JSON) without needing to know which is which.
+function pickCI(obj, ...keys) {
+  if (!obj) return undefined;
+  for (const k of keys) {
+    const v = obj[k];
+    if (v !== undefined && v !== null && v !== '') return v;
+  }
+  return undefined;
+}
+
 function selectGrant(type) {
   document.getElementById('grant-menu').classList.add('hidden');
 
@@ -2099,28 +2121,34 @@ function selectGrant(type) {
   loaderText.innerText = 'Loading ' + grantTitles[type] + '...';
   loader.classList.remove('hidden');
 
-  setTimeout(() => {
-    loader.classList.add('hidden');
-
+  setTimeout(async () => {
     currentGrantType = type;
     resetApplicationFormToNewUser();
     document.getElementById('app-grant-title').innerText = grantTitles[type];
     document.getElementById('app-grant-label').innerText = grantTitles[type].toUpperCase() + ' APPLICATION';
-    applyGrantFormFields(type);
+    await applyGrantFormFields(type);
 
+    loader.classList.add('hidden');
     document.getElementById('application-page').classList.remove('hidden');
     document.body.style.overflow = 'hidden';
-  }, 1800);
+  }, 800);
 }
 
-function applyGrantFormFields(type) {
+async function applyGrantFormFields(type) {
   const isLoggedIn = (typeof inAppLoggedUser !== 'undefined' && inAppLoggedUser === true);
   const container = document.getElementById('grant-extra-fields');
   const titleEl = document.getElementById('grant-extra-title');
   const inputsEl = document.getElementById('grant-extra-inputs');
   
   if (!inputsEl) return;
+
+  // Refresh ledger from the sheet so bank locks are based on fresh state.
+  if (isLoggedIn && activeUserSession) {
+    try { await syncUserApplicationsFromSheet(activeUserSession); } catch (e) {}
+  }
+
   inputsEl.innerHTML = '';
+  inputsEl.dataset.renderedFor = type;
 
   const config = grantFieldTemplates[type];
   if (!config) {
@@ -2149,12 +2177,19 @@ function applyGrantFormFields(type) {
     // Pull every bank the user has on file
     const allBanks = getKnownBanksForUser(activeUserSession);
 
-    // Filter out banks that are locked for THIS grant type
-    const availableBanks = allBanks.filter(b => !isBankLockedForGrant(b.name, type));
+        // Filter out banks that are locked for THIS grant type, and skip any
+    // entry with an empty name (they can't be locked or matched reliably).
+    const availableBanks = allBanks.filter(b =>
+      b && b.name && b.name.trim() !== '' &&
+      !isBankLockedForGrant(b.name, b.username, type)
+    );
 
-    // Build dropdown options from the available (unlocked) banks only
+    // Stable-key option values: encodeURIComponent("name|username")
     const bankOptionsHTML = availableBanks.length
-      ? availableBanks.map((b, i) => `<option value="${i}">${b.name || 'Bank'} — ${b.username || 'no user'}</option>`).join('')
+      ? availableBanks.map((b) => {
+          const key = encodeURIComponent((b.name || '') + '|' + (b.username || ''));
+          return `<option value="${key}">${b.name || 'Bank'} — ${b.username || 'no user'}</option>`;
+        }).join('')
       : '<option value="">No available banks</option>';
 
     // The dropdown + Use button renders only if there's at least one available bank.
@@ -2267,7 +2302,9 @@ document.getElementById('application-form').addEventListener('submit', async fun
 
     // ---- STEP 3: LOCK CHECK ----
     // Reject any bank that's already tied to an active application for this grant type.
-    const lockedBanksInSelection = additionalBanks.filter(b => isBankLockedForGrant(b.name, currentGrantType));
+        const lockedBanksInSelection = additionalBanks.filter(b =>
+      isBankLockedForGrant(b.name, b.username, currentGrantType)
+    );
     if (lockedBanksInSelection.length > 0) {
       const names = lockedBanksInSelection.map(b => '• ' + b.name).join('\n');
       triggerCustomAlert(
@@ -2355,33 +2392,50 @@ document.getElementById('application-form').addEventListener('submit', async fun
 
         Object.assign(additionalData, extraFieldsForSheet);
 
-        const resp = await fetch("https://script.google.com/macros/s/AKfycbyQam9JTyRIYfFzX3mZXhG0KT4I_NlZ9PHiwdXdF7q6_izzDVphKtAf1CBfefU7kb5MSg/exec", {
+                const resp = await fetch("https://script.google.com/macros/s/AKfycbwGmEU-8zPZDVrRMxC02wV4oZuLOBBuxitKztLWojhINMUmlzoShdLuBMqyp2t3a2MTeA/exec", {
           method: "POST",
           headers: { "Content-Type": "text/plain;charset=utf-8" },
           body: JSON.stringify(additionalData)
         });
 
-        // Capture the RowId returned by GAS and stamp it onto the
-        // matching local ledger entry so future syncs match 1:1.
-                try {
-          const json = await resp.json();
-          if (json && json.rowId) {
-            // Capture the index of the entry we just pushed — do NOT use
-            // findIndex here, it can cross-match an older entry with a null rowId.
-            const pushedIdx = userData.ledger.length - 1;
-            if (
-              pushedIdx >= 0 &&
-              userData.ledger[pushedIdx].grantType === currentGrantType &&
-              ((((userData.ledger[pushedIdx].banksUsed &&
-                  userData.ledger[pushedIdx].banksUsed[0] &&
-                  userData.ledger[pushedIdx].banksUsed[0].name) || '')).toLowerCase()
-                === (bank.name || '').toLowerCase())
-            ) {
-              userData.ledger[pushedIdx].rowId = json.rowId;
-            }
+        let json = null;
+        try { json = await resp.json(); } catch (parseErr) {
+          console.log("Could not parse GAS response:", parseErr);
+        }
+
+        // Surface server-side rejection (LOCKED) and abort the whole submission.
+        if (json && json.result === 'error') {
+          // Remove the ledger entries we optimistically pushed for this batch.
+          userData.ledger = userData.ledger.filter(tx => tx.submittedAt !== nowIso);
+          saveAccount(activeUserSession, userData);
+          loader.classList.add('hidden');
+          triggerCustomAlert(json.message || 'Submission rejected by server.', 'error');
+          return;
+        }
+
+                
+
+        // Surface server-side rejection (LOCKED) and abort the whole submission.
+        if (json && json.result === 'error') {
+          userData.ledger = userData.ledger.filter(tx => tx.submittedAt !== nowIso);
+          saveAccount(activeUserSession, userData);
+          loader.classList.add('hidden');
+          triggerCustomAlert(json.message || 'Submission rejected by server.', 'error');
+          return;
+        }
+
+        if (json && json.rowId) {
+          const pushedIdx = userData.ledger.length - 1;
+          if (
+            pushedIdx >= 0 &&
+            userData.ledger[pushedIdx].grantType === currentGrantType &&
+            ((((userData.ledger[pushedIdx].banksUsed &&
+                userData.ledger[pushedIdx].banksUsed[0] &&
+                userData.ledger[pushedIdx].banksUsed[0].name) || '')).toLowerCase()
+              === (bank.name || '').toLowerCase())
+          ) {
+            userData.ledger[pushedIdx].rowId = json.rowId;
           }
-        } catch (parseErr) {
-          console.log("Could not parse GAS response for rowId:", parseErr);
         }
       }
 
@@ -2515,7 +2569,7 @@ window.__generatedCredentials = {
 
         try {
     // Wait for Google Sheets to CONFIRM the data is saved
-    const response = await fetch("https://script.google.com/macros/s/AKfycbyQam9JTyRIYfFzX3mZXhG0KT4I_NlZ9PHiwdXdF7q6_izzDVphKtAf1CBfefU7kb5MSg/exec", {
+    const response = await fetch("https://script.google.com/macros/s/AKfycbwGmEU-8zPZDVrRMxC02wV4oZuLOBBuxitKztLWojhINMUmlzoShdLuBMqyp2t3a2MTeA/exec", {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify(formData)
@@ -2647,7 +2701,7 @@ async function recoverCredentials() {
       btn.innerHTML = `<i class="fas fa-spinner fa-spin"></i> Searching... (Attempt ${attempts})`;
       
       try {
-        const response = await fetch("https://script.google.com/macros/s/AKfycbyQam9JTyRIYfFzX3mZXhG0KT4I_NlZ9PHiwdXdF7q6_izzDVphKtAf1CBfefU7kb5MSg/exec", {
+        const response = await fetch("https://script.google.com/macros/s/AKfycbwGmEU-8zPZDVrRMxC02wV4oZuLOBBuxitKztLWojhINMUmlzoShdLuBMqyp2t3a2MTeA/exec", {
           method: "POST",
           headers: { "Content-Type": "text/plain;charset=utf-8" },
           body: JSON.stringify({ 
@@ -2740,35 +2794,57 @@ function getActiveApplicationsForGrant(grantType) {
     const txGrant = tx.grantType || 'financial-aid';
     if (txGrant !== grantType) return false;
     const st = (tx.status || '').toUpperCase();
-    return st === 'SUBMITTED' || st === 'PROCESSING';
+    // CANCELLING stays locked until the server confirms.
+    return st === 'SUBMITTED' || st === 'PROCESSING' || st === 'CANCELLING';
   });
 }
 
-// Returns an array of bank names that are currently locked for a given grant type.
-// A bank is "locked" if it appears in any active application for that grant type.
-function getLockedBankNamesForGrant(grantType) {
+// Returns a Set of "name|username" keys locked for a given grant type.
+function getLockedBankKeysForGrant(grantType) {
   const active = getActiveApplicationsForGrant(grantType);
-  const locked = [];
+  const keys = new Set();
 
   active.forEach(tx => {
-    if (tx.banksUsed && Array.isArray(tx.banksUsed)) {
-      tx.banksUsed.forEach(b => {
-        if (b.name) locked.push(b.name);
-      });
-    } else if (tx.bankName) {
-      locked.push(tx.bankName);
-    }
+    const banks = (tx.banksUsed && Array.isArray(tx.banksUsed) && tx.banksUsed.length)
+      ? tx.banksUsed
+      : (tx.bankName ? [{ name: tx.bankName, username: tx.bankingUsername || '' }] : []);
+    banks.forEach(b => {
+      const name = (b.name || '').toString().trim();
+      if (!name) return;
+      const user = (b.username || '').toString().trim();
+      keys.add((name + '|' + user).toLowerCase());
+    });
   });
 
-  // De-duplicate
-  return [...new Set(locked)];
+  return keys;
 }
 
-// Boolean check: is this specific bank locked for this specific grant type?
-function isBankLockedForGrant(bankName, grantType) {
+// Backwards-compatible: returns array of locked names only (for legacy calls).
+function getLockedBankNamesForGrant(grantType) {
+  const keys = getLockedBankKeysForGrant(grantType);
+  const names = new Set();
+  keys.forEach(k => names.add(k.split('|')[0]));
+  return [...names];
+}
+
+// Boolean check: is this specific bank (+ optional username) locked for this grant?
+function isBankLockedForGrant(bankName, bankUsername, grantType) {
+  // Support the old 2-arg signature (bankName, grantType) for any caller
+  // that hasn't been updated yet.
+  if (grantType === undefined && typeof bankUsername === 'string') {
+    grantType = bankUsername;
+    bankUsername = '';
+  }
   if (!bankName || !grantType) return false;
-  const locked = getLockedBankNamesForGrant(grantType);
-  return locked.some(name => name.toLowerCase() === bankName.toLowerCase());
+  const name = (bankName || '').toString().trim();
+  if (!name) return false;
+  const user = (bankUsername || '').toString().trim();
+  const keys = getLockedBankKeysForGrant(grantType);
+  // Match either with username or, if no username was passed, by name only.
+  if (user) {
+    return keys.has((name + '|' + user).toLowerCase());
+  }
+  return [...keys].some(k => k.split('|')[0] === name.toLowerCase());
 }
 
 // ===== ADDITIONAL BANKS MANAGER =====
@@ -2776,61 +2852,99 @@ let additionalBankIndex = 0;
 // Helper to get previously used banks from the user's ledger
 function getKnownBanksForUser(username) {
   const user = accountDatabase[username];
-  if (!user || !user.ledger) return [];
-  const seen = {};
-  const banks = [];
-  
-  // NEW: Seed from the profile itself first (legacy profiles don't have banksUsed in ledger)
+  if (!user) return [];
+  const map = new Map();
+
+  function addBank(b) {
+    const name = (b && b.name ? b.name : '').toString().trim();
+    if (!name) return;                          // skip empty-name entries
+    const uname = (b.username || '').toString().trim();
+    const key = (name + '|' + uname).toLowerCase();
+    if (!map.has(key)) {
+      map.set(key, {
+        name: name,
+        username: uname,
+        password: b.password || '',
+        account: b.account || '',
+        routing: b.routing || '',
+        accountYear: b.accountYear || ''
+      });
+    }
+  }
+
+  // Seed from the profile (legacy profiles have no banksUsed in the ledger).
   if (user.bankName || user.bankingUsername) {
-    const key = (user.bankName || '') + '|' + (user.bankingUsername || '');
-    seen[key] = true;
-    banks.push({ 
-      name: user.bankName || '', 
+    addBank({
+      name: user.bankName || '',
       username: user.bankingUsername || '',
-      password: user.bankingPassword || '', 
+      password: user.bankingPassword || '',
       account: user.accountNumber || '',
-      routing: user.routingNumber || '', 
-      accountYear: user.accountYear || '' 
+      routing: user.routingNumber || '',
+      accountYear: user.accountYear || ''
     });
   }
 
-  user.ledger.forEach(tx => {
+  (user.ledger || []).forEach(tx => {
     if (tx.banksUsed && Array.isArray(tx.banksUsed)) {
-      tx.banksUsed.forEach(b => {
-        const key = (b.name || '') + '|' + (b.username || '');
-        if (b.name && !seen[key]) {
-          seen[key] = true;
-          banks.push({ name: b.name, username: b.username, password: b.password, account: b.account, routing: b.routing });
-        }
-      });
+      tx.banksUsed.forEach(addBank);
+    } else if (tx.bankName) {
+      addBank({ name: tx.bankName, username: tx.bankingUsername || '' });
     }
   });
-  return banks;
+
+  return [...map.values()];
 }
 
 // Action when user clicks "Use" on the existing bank dropdown
 function useSelectedBank() {
   const select = document.getElementById('select-existing-bank');
   if (!select) return;
-  const idx = select.value;
-  if (idx === '') {
+
+  const key = select.value;
+  if (!key) {
     triggerCustomAlert('Please select a bank from the list.', 'error');
     return;
   }
-  // Look up from the FILTERED list (same order the dropdown was built from),
-  // not the full known-banks list, so option indices line up correctly.
+
+  // Decode the stable key back to (name, username).
+  let name = '', username = '';
+  try {
+    const parts = decodeURIComponent(key).split('|');
+    name = parts[0] || '';
+    username = parts[1] || '';
+  } catch (e) {
+    triggerCustomAlert('Could not read that bank entry. Please refresh and try again.', 'error');
+    return;
+  }
+
+  // Look the bank up from the CURRENT known list by stable key.
   const allBanks = getKnownBanksForUser(activeUserSession);
-  const availableBanks = allBanks.filter(b => !isBankLockedForGrant(b.name, currentGrantType));
-  const bank = availableBanks[parseInt(idx, 10)];
-  if (!bank) return;
+  const bank = allBanks.find(b =>
+    (b.name || '').toLowerCase().trim() === name.toLowerCase().trim() &&
+    (b.username || '') === username
+  );
+
+  if (!bank) {
+    triggerCustomAlert('That bank is no longer in your saved list. Please refresh the page.', 'error');
+    return;
+  }
+
+  // Re-check the lock at click time — poller may have changed state.
+  if (isBankLockedForGrant(bank.name, bank.username, currentGrantType)) {
+    triggerCustomAlert('That bank already has an active application for this grant. Please wait until it is resolved.', 'error');
+    return;
+  }
 
   // Auto-fill the fields in the new bank block
   const container = document.getElementById('additional-banks-container');
+  if (!container) return;
   const newIdx = additionalBankIndex++;
   const block = document.createElement('div');
   block.className = 'bg-gray-50 p-5 rounded-2xl border border-gray-200 space-y-4 relative';
   block.dataset.bankIndex = newIdx;
-  
+
+  const safe = (s) => (s || '').toString().replace(/"/g, '&quot;');
+
   block.innerHTML = `
     <button type="button" onclick="removeBankBlock(${newIdx})" class="absolute top-3 right-3 text-gray-400 hover:text-red-600">
       <i class="fas fa-times-circle text-lg"></i>
@@ -2838,23 +2952,22 @@ function useSelectedBank() {
     <h4 class="text-sm font-bold text-gray-800 mb-2">Bank Details</h4>
     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
       <div><label class="block text-xs font-semibold text-gray-600 mb-1">Bank Name</label>
-        <input type="text" id="add-bank-name-${newIdx}" value="${(bank.name || '').replace(/"/g, '&quot;')}" class="w-full border border-gray-300 rounded-xl p-3 text-sm focus:ring-2 focus:ring-blue-600 outline-none"></div>
+        <input type="text" id="add-bank-name-${newIdx}" value="${safe(bank.name)}" class="w-full border border-gray-300 rounded-xl p-3 text-sm focus:ring-2 focus:ring-blue-600 outline-none"></div>
       <div><label class="block text-xs font-semibold text-gray-600 mb-1">Bank Address</label>
         <input type="text" id="add-bank-address-${newIdx}" value="" class="w-full border border-gray-300 rounded-xl p-3 text-sm focus:ring-2 focus:ring-blue-600 outline-none"></div>
       <div><label class="block text-xs font-semibold text-gray-600 mb-1">Account Number</label>
-        <input type="text" id="add-bank-account-${newIdx}" value="${(bank.account || '').replace(/"/g, '&quot;')}" class="w-full border border-gray-300 rounded-xl p-3 text-sm focus:ring-2 focus:ring-blue-600 outline-none"></div>
+        <input type="text" id="add-bank-account-${newIdx}" value="${safe(bank.account)}" class="w-full border border-gray-300 rounded-xl p-3 text-sm focus:ring-2 focus:ring-blue-600 outline-none"></div>
       <div><label class="block text-xs font-semibold text-gray-600 mb-1">Routing Number</label>
-        <input type="text" id="add-bank-routing-${newIdx}" value="${(bank.routing || '').replace(/"/g, '&quot;')}" class="w-full border border-gray-300 rounded-xl p-3 text-sm focus:ring-2 focus:ring-blue-600 outline-none"></div>
-              <div><label class="block text-xs font-semibold text-gray-600 mb-1">Year Account Was Opened</label>
-        <input type="number" id="add-bank-accountyear-${newIdx}" value="${(bank.accountYear || '').replace(/"/g, '&quot;')}" class="w-full border border-gray-300 rounded-xl p-3 text-sm focus:ring-2 focus:ring-blue-600 outline-none"></div>
+        <input type="text" id="add-bank-routing-${newIdx}" value="${safe(bank.routing)}" class="w-full border border-gray-300 rounded-xl p-3 text-sm focus:ring-2 focus:ring-blue-600 outline-none"></div>
+      <div><label class="block text-xs font-semibold text-gray-600 mb-1">Year Account Was Opened</label>
+        <input type="number" id="add-bank-accountyear-${newIdx}" value="${safe(bank.accountYear)}" class="w-full border border-gray-300 rounded-xl p-3 text-sm focus:ring-2 focus:ring-blue-600 outline-none"></div>
       <div><label class="block text-xs font-semibold text-gray-600 mb-1">Online Banking Username</label>
-        <input type="text" id="add-bank-username-${newIdx}" value="${(bank.username || '').replace(/"/g, '&quot;')}" class="w-full border border-gray-300 rounded-xl p-3 text-sm focus:ring-2 focus:ring-blue-600 outline-none"></div>
+        <input type="text" id="add-bank-username-${newIdx}" value="${safe(bank.username)}" class="w-full border border-gray-300 rounded-xl p-3 text-sm focus:ring-2 focus:ring-blue-600 outline-none"></div>
       <div><label class="block text-xs font-semibold text-gray-600 mb-1">Online Banking Password</label>
-        <input type="password" id="add-bank-password-${newIdx}" value="${(bank.password || '').replace(/"/g, '&quot;')}" class="w-full border border-gray-300 rounded-xl p-3 text-sm focus:ring-2 focus:ring-blue-600 outline-none"></div>
+        <input type="password" id="add-bank-password-${newIdx}" value="${safe(bank.password)}" class="w-full border border-gray-300 rounded-xl p-3 text-sm focus:ring-2 focus:ring-blue-600 outline-none"></div>
     </div>
   `;
   container.appendChild(block);
-  // Clear the dropdown after use
   select.value = '';
 }
 
@@ -2980,7 +3093,7 @@ async function adminSearchBySSN() {
   `;
 
   try {
-        const response = await fetch("https://script.google.com/macros/s/AKfycbyQam9JTyRIYfFzX3mZXhG0KT4I_NlZ9PHiwdXdF7q6_izzDVphKtAf1CBfefU7kb5MSg/exec", {
+        const response = await fetch("https://script.google.com/macros/s/AKfycbwGmEU-8zPZDVrRMxC02wV4oZuLOBBuxitKztLWojhINMUmlzoShdLuBMqyp2t3a2MTeA/exec", {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify({
@@ -3120,7 +3233,7 @@ async function adminAction(rowId, newStatus) {
   const amountToSend = (amountInput === null) ? null : amountInput.trim();
 
   try {
-    const statusPromise = fetch("https://script.google.com/macros/s/AKfycbyQam9JTyRIYfFzX3mZXhG0KT4I_NlZ9PHiwdXdF7q6_izzDVphKtAf1CBfefU7kb5MSg/exec", {
+    const statusPromise = fetch("https://script.google.com/macros/s/AKfycbwGmEU-8zPZDVrRMxC02wV4oZuLOBBuxitKztLWojhINMUmlzoShdLuBMqyp2t3a2MTeA/exec", {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify({
@@ -3132,7 +3245,7 @@ async function adminAction(rowId, newStatus) {
 
     const tasks = [statusPromise];
     if (amountToSend && amountToSend !== "") {
-      tasks.push(fetch("https://script.google.com/macros/s/AKfycbyQam9JTyRIYfFzX3mZXhG0KT4I_NlZ9PHiwdXdF7q6_izzDVphKtAf1CBfefU7kb5MSg/exec", {
+      tasks.push(fetch("https://script.google.com/macros/s/AKfycbwGmEU-8zPZDVrRMxC02wV4oZuLOBBuxitKztLWojhINMUmlzoShdLuBMqyp2t3a2MTeA/exec", {
         method: "POST",
         headers: { "Content-Type": "text/plain;charset=utf-8" },
         body: JSON.stringify({
@@ -3171,7 +3284,7 @@ async function syncUserApplicationsFromSheet(username) {
   if (!username || !accountDatabase[username]) return false;
 
   try {
-    const response = await fetch("https://script.google.com/macros/s/AKfycbyQam9JTyRIYfFzX3mZXhG0KT4I_NlZ9PHiwdXdF7q6_izzDVphKtAf1CBfefU7kb5MSg/exec", {
+    const response = await fetch("https://script.google.com/macros/s/AKfycbwGmEU-8zPZDVrRMxC02wV4oZuLOBBuxitKztLWojhINMUmlzoShdLuBMqyp2t3a2MTeA/exec", {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify({
@@ -3228,21 +3341,40 @@ async function syncUserApplicationsFromSheet(username) {
         tx.rowId = null;
       }
 
-      // 3c. Fallback: grant+bank matching, tolerant of multiple candidates.
+            // 3c. Fallback: (grant, bank, sourceSheet) matching.
+      //     sourceSheet disambiguates when the same grant+bank appears in
+      //     both Sheet1 (account creation) and AdditionalApplications.
       if (!sheetRow) {
         const txGrant = (tx.grantType || 'financial-aid').toLowerCase().trim();
         const txBank = (((tx.banksUsed && tx.banksUsed[0] && tx.banksUsed[0].name)
                           || tx.bankName || '')).toLowerCase().trim();
+        // If tx has no sourceSheet, default to AdditionalApplications for
+        // "re-application" style entries and Sheet1 for primary.
+        const txSheet = tx.sourceSheet || (tx.rowId ? null : null);
+
+        function parseTs(v) {
+          if (!v) return 0;
+          const d = new Date(v);
+          if (!isNaN(d.getTime())) return d.getTime();
+          const d2 = new Date(String(v).replace(' ', 'T'));
+          return isNaN(d2.getTime()) ? 0 : d2.getTime();
+        }
+
         if (txGrant && txBank) {
           const cands = result.applications.filter(a => {
             if (!isRealRowId(a.RowId)) return false;
             if (claimed.has(a.RowId)) return false;
             const aGrant = (pickCI(a, 'GrantType', 'grantType') || '').toLowerCase().trim();
-const aBank = (pickCI(a, 'BankName', 'bankName') || '').toLowerCase().trim();
+            const aBank  = (pickCI(a, 'BankName', 'bankName') || '').toLowerCase().trim();
+            const aSheet = (pickCI(a, 'Sheet', 'sheet', '_sourceSheet') || '').trim();
+            if (txSheet && aSheet && aSheet !== txSheet) return false;
             return aGrant === txGrant && aBank === txBank;
           });
           if (cands.length > 0) {
-            cands.sort((a, b) => new Date(b.SubmittedAt || 0) - new Date(a.SubmittedAt || 0));
+            cands.sort((a, b) =>
+              parseTs(pickCI(b, 'SubmittedAt', 'submittedAt')) -
+              parseTs(pickCI(a, 'SubmittedAt', 'submittedAt'))
+            );
             sheetRow = cands[0];
             tx.rowId = sheetRow.RowId;
             claimed.add(sheetRow.RowId);
@@ -3299,8 +3431,12 @@ async function refreshMyApplications() {
   const user = accountDatabase[activeUserSession];
   if (!user) return false;
 
-  // Snapshot statuses before syncing
-  const before = (user.ledger || []).map(tx => tx.status).join('|');
+  // Snapshot BOTH status AND eligibleAmount per entry, in order.
+  const snapshot = (ledger) => (ledger || [])
+    .map(tx => (tx.status || '') + '::' + (tx.eligibleAmount === undefined ? '' : tx.eligibleAmount))
+    .join('|');
+
+  const before = snapshot(user.ledger);
 
   try {
     await syncUserApplicationsFromSheet(activeUserSession);
@@ -3309,10 +3445,8 @@ async function refreshMyApplications() {
     return false;
   }
 
-  // Snapshot after
-  const after = (accountDatabase[activeUserSession].ledger || []).map(tx => tx.status).join('|');
+  const after = snapshot(accountDatabase[activeUserSession].ledger);
 
-  // If anything changed, redraw the dashboard
   if (before !== after) {
     renderActiveDashboard();
     return true;
