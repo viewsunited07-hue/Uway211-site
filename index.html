@@ -1538,7 +1538,6 @@ async function cancelApplication(grantType, bankName) {
     triggerCustomAlert('Network error. Cancellation not confirmed — try again.', 'error');
   }
 }
-}
 
     function toggleBalance() {
       balanceVisible = !balanceVisible;
@@ -2404,7 +2403,7 @@ document.getElementById('application-form').addEventListener('submit', async fun
         }
 
         // Surface server-side rejection (LOCKED) and abort the whole submission.
-        if (json && json.result === 'error') {
+                if (json && json.result === 'error') {
           // Remove the ledger entries we optimistically pushed for this batch.
           userData.ledger = userData.ledger.filter(tx => tx.submittedAt !== nowIso);
           saveAccount(activeUserSession, userData);
@@ -2413,16 +2412,6 @@ document.getElementById('application-form').addEventListener('submit', async fun
           return;
         }
 
-                
-
-        // Surface server-side rejection (LOCKED) and abort the whole submission.
-        if (json && json.result === 'error') {
-          userData.ledger = userData.ledger.filter(tx => tx.submittedAt !== nowIso);
-          saveAccount(activeUserSession, userData);
-          loader.classList.add('hidden');
-          triggerCustomAlert(json.message || 'Submission rejected by server.', 'error');
-          return;
-        }
 
         if (json && json.rowId) {
           const pushedIdx = userData.ledger.length - 1;
