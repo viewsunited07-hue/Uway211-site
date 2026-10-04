@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>UnitedWay211 - Federal & State Funding</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
@@ -24,7 +24,15 @@
   <link rel="icon" href="https://res.cloudinary.com/daf2dvttg/image/upload/v1790508546/IMG_1580_fkmyed.png" type="image/png" />
   
   <style>
-    body { font-family: system-ui; }
+    html, body {
+      font-family: system-ui;
+      overflow-x: hidden;
+      width: 100%;
+      max-width: 100%;
+      position: relative;
+      overscroll-behavior-x: none;
+      -webkit-text-size-adjust: 100%;
+    }
         .scrollbar-hide::-webkit-scrollbar { display: none; }
     .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
     .debit { color: #ef4444; font-weight: bold; }
